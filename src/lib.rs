@@ -1,7 +1,7 @@
 //! The stages of the Tekken 3 arcade game (Namco System 12, 1997; MAME's `tekken3` ROM set) as glbs: read from the
-//! ROM set (`roms`: a .zip or a folder; the data region, the program's floor tables), each stage's textures (`tim`),
-//! its model (`model`) built into meshes (`stage`, `atlas`), its fighting floor (`floor`), written as a glb (`glb`)
-//! into a pack (`pack`). Files go through `ok_converter_common::io::Vfs`; `main` is the command line.
+//! ROM set (`roms`: a .zip or a folder; the data region, the program's file, floor and sky tables), each stage's
+//! textures (`tim`), its model (`model`) built into meshes (`stage`, `atlas`), its fighting floor (`floor`), its sky
+//! (`sky`), written as a glb (`glb`) into a pack (`pack`). Files go through `ok_converter_common::io::Vfs`; `main` is the command line.
 //!
 //! Everything in the ROMs is little-endian and untrusted: a read outside the data is an error, never a panic.
 
@@ -11,6 +11,7 @@ pub mod glb;
 pub mod model;
 pub mod pack;
 pub mod roms;
+pub mod sky;
 pub mod stage;
 pub mod tim;
 

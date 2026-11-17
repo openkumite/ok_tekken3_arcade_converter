@@ -5,8 +5,10 @@
 //! ```text
 //! manifest.json        {"pack": "t3arcade", "format": FORMAT, "source": {"program": the program ROM pair read},
 //!                       "stages": [{"name", "file", "game_file", "title", "replaces", "lighting": "prelit" | "lit",
-//!                                   "backdrop_scale", "faces", "triangles", "vertices",
-//!                                   "floor": {"tiles", "size_m"}}, ...]}
+//!                                   "backdrop_scale" (of `file`'s backdrop node; the game's glb has the game's),
+//!                                   "faces", "triangles", "vertices", "floor": {"tiles", "size_m"},
+//!                                   "sky": null | {"fov", "ybase", "pitchmul", "top", "bottom", "max_y", "min_y"}
+//!                                   (`sky::placement`)}, ...]}
 //! stages/stage_NN.glb  each stage as a glb (`glb`: metres, Y up), as the Python tool this converter comes from
 //!                      wrote it: to look at in any glTF viewer
 //! assets/arcade/stage_NN.glb
@@ -15,15 +17,16 @@
 //! ```
 
 use crate::floor::{self, build_floor};
-use crate::glb::{self, BACKDROP_SCALE};
-use crate::roms::{RomSet, group_stages, load_banked, load_floor_tables};
+use crate::glb::BACKDROP_SCALE;
+use crate::roms::{RomSet, load_program};
 use crate::stage::build_stage;
+use crate::{glb, sky};
 use anyhow::{Context, Result, bail};
 use ok_converter_common::io::{Ctx, Vfs};
 use serde_json::{Value, json};
 
 /// The pack's layout and contents; another one is converted again.
-pub const FORMAT: i64 = 1;
+pub const FORMAT: i64 = 2;
 /// What a pack's manifest names it.
 pub const KIND: &str = "t3arcade";
 /// The folder of the pack's files the game reads as they are (as the other packs').
@@ -38,7 +41,7 @@ const TITLES: [&str; 13] = [
     "Temple courtyard",
     "Downtown street",
     "Lantern hall",
-    "Circular arena",
+    "Schoolyard before a city skyline",
     "Wooden dojo",
     "Industrial helipad at night",
     "Jungle ruins",
@@ -47,8 +50,7 @@ const TITLES: [&str; 13] = [
 ];
 
 /// The PlayStation game's stage each arcade stage stands in for: the same number (the two games keep their stages in
-/// the same order; twelve are the same place by look; the eighth, a ruined stone arena here, is a plaza before a
-/// skyline there).
+/// the same order, and all 13 are the same place by look).
 const REPLACES: [Option<u32>; 13] = [
     Some(0),
     Some(1),
@@ -66,21 +68,20 @@ const REPLACES: [Option<u32>; 13] = [
 ];
 
 /// Converts every stage of the ROM set, giving each one's manifest entry, glb and the game's glb to `each` in turn; returns the
-/// name of the program ROM pair the floors were read from.
+/// name of the program ROM pair they were read through.
 pub fn stages(roms: &dyn RomSet, each: &mut dyn FnMut(Value, Vec<u8>, Vec<u8>) -> Result<()>) -> Result<&'static str> {
-    let bank = load_banked(roms)?;
-    let stages = group_stages(&bank)?;
-    if stages.len() != TITLES.len() {
-        bail!("{} stage models in the data ROMs, not {}: not the tekken3 ROM set", stages.len(), TITLES.len());
+    let program = load_program(roms)?;
+    let n = [program.stages.len(), program.floors.len(), program.skies.len()];
+    if n != [TITLES.len(); 3] {
+        bail!("{n:?} stages' files, floors and skies in the program, not {} of each", TITLES.len());
     }
-    let (program, floors) = load_floor_tables(roms)?;
-    for (i, ((stage, entries), (title, replaces))) in
-        stages.iter().zip(&floors).zip(TITLES.iter().zip(REPLACES)).enumerate()
-    {
+    let tables = program.stages.iter().zip(&program.floors).zip(&program.skies);
+    for (i, (((stage, entries), sky), (title, replaces))) in tables.zip(TITLES.iter().zip(REPLACES)).enumerate() {
         let name = format!("stage_{i:02}");
         let (entry, glb, game) = (|| {
             let st = build_stage(stage)?;
-            let floor = build_floor(&st.vram, i, entries)?;
+            let floor = build_floor(&st.vram, entries)?;
+            let sky = sky::build(i, sky, &st.vram)?;
             let entry = json!({
                 "name": name,
                 "file": format!("stages/{name}.glb"),
@@ -93,13 +94,15 @@ pub fn stages(roms: &dyn RomSet, each: &mut dyn FnMut(Value, Vec<u8>, Vec<u8>) -
                 "triangles": st.groups.iter().map(|(_, g)| g.pos.len() / 3).sum::<usize>(),
                 "vertices": st.vertices,
                 "floor": {"tiles": floor.tiles, "size_m": floor::SIZE_M},
+                "sky": sky.as_ref().map(|s| &s.1),
             });
-            Ok::<_, anyhow::Error>((entry, glb::write(&name, &st, &floor)?, glb::write_game(title, &st, &floor)?))
+            let game = glb::write_game(i, title, &st, &floor, sky.as_ref())?;
+            Ok::<_, anyhow::Error>((entry, glb::write(&name, &st, &floor)?, game))
         })()
         .with_context(|| format!("stage {i}"))?;
         each(entry, glb, game)?;
     }
-    Ok(program)
+    Ok(program.name)
 }
 
 /// Converts the stages of the ROM set `roms` into a pack in `ctx.out`, emptied first; writes the manifest last and

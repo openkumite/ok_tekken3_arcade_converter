@@ -52,7 +52,7 @@ pub fn build_stage(stage: &roms::Stage) -> Result<Built> {
     for t in &stage.tims {
         vram.load_tims(t)?;
     }
-    let (verts, faces) = parse_stage(stage.model)?;
+    let (verts, faces) = parse_stage(&stage.model)?;
 
     // the texture regions: (tpage, clut, semi) and [umin, vmin, umax, vmax]
     let mut regions: Vec<((u32, u32, bool), [i32; 4])> = Vec::new();

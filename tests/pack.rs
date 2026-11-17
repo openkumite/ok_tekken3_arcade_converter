@@ -1,7 +1,9 @@
 //! The pack end to end. Without the ROM set: zero-filled ROMs give an error. With it (`T3_ARCADE_ROMS`: the .zip or
 //! the folder): a zip and a folder give the same pack, twice the same bytes, 13 stages (the game's glbs laid out as
-//! its stages); and with the Python tool's
-//! export too (`T3_ARCADE_PY_EXPORT`: the folder t3_stage_export.py wrote), every glb decodes to the same content.
+//! its stages), the same through every program ROM pair of the set; with the Python tool's export too
+//! (`T3_ARCADE_PY_EXPORT`: the folder t3_stage_export.py wrote), every glb but the eighth stage's decodes to the
+//! same content; with the reference skies (`T3_ARCADE_SKY_REF`: the folder of `stage_NN_sky.png` the research
+//! script sky_render.py wrote), the skies are the same pictures.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -94,11 +96,23 @@ fn zip_and_folder_give_the_same_pack() {
             (Some("sky"), Some("floor"), 2 + 81),
             "{path}"
         );
+        let extras = &scene["extras"];
         assert_eq!(
-            (&scene["extras"]["drum"], &scene["extras"]["floor_period"]),
-            (&"model".into(), &serde_json::json!([25.0, 25.0])),
+            (&extras["drum"], &extras["drum_cull"], &extras["floor_period"]),
+            (&"model".into(), &true.into(), &serde_json::json!([25.0, 25.0])),
             "{path}"
         );
+        // the sky: the last image, of no texture; the black stage has none
+        let (images, sky) = (j["images"].as_array().unwrap(), &extras["sky"]);
+        assert_eq!(sky.is_null(), path.ends_with("stage_06.glb"), "{path}");
+        assert_eq!(images.len(), j["textures"].as_array().unwrap().len() + usize::from(!sky.is_null()), "{path}");
+        if !sky.is_null() {
+            assert_eq!(
+                (sky["image"].as_u64(), images.last().unwrap()["name"].as_str()),
+                (Some(images.len() as u64 - 1), Some("sky"))
+            );
+            assert!(sky["fov"].is_u64() && sky["ybase"].is_i64() && sky["pitchmul"].is_u64(), "{path}");
+        }
         for p in j["meshes"].as_array().unwrap().iter().flat_map(|m| m["primitives"].as_array().unwrap()) {
             let count = |a: &Value| j["accessors"][a.as_u64().unwrap() as usize]["count"].clone();
             let n = count(&p["indices"]);
@@ -110,7 +124,10 @@ fn zip_and_folder_give_the_same_pack() {
         }
     }
     let manifest: Value = serde_json::from_slice(&first["manifest.json"]).unwrap();
-    assert_eq!(manifest["stages"].as_array().unwrap().len(), 13);
+    let stages = manifest["stages"].as_array().unwrap();
+    assert_eq!(stages.len(), 13);
+    assert_eq!(stages.iter().filter(|s| s["sky"].is_object()).count(), 12);
+    assert_eq!(stages[11]["sky"]["min_y"], -192);
     assert_eq!(convert(given.as_ref(), "again").unwrap(), first, "converting twice");
 
     // the ROMs the conversion reads, as a folder and as a zip (in a folder of the archive, as MAME's merged sets are)
@@ -131,6 +148,17 @@ fn zip_and_folder_give_the_same_pack() {
         "the pack of a zip differs"
     );
     std::fs::remove_dir_all(&folder.0).unwrap();
+
+    // through each program ROM pair of the set (their tables are at other addresses): the same stages
+    let mut roms =
+        MemRoms(DATA_ROMS.iter().flat_map(|&(lo, hi)| [lo, hi]).map(|n| (n.into(), given.read(n).unwrap())).collect());
+    for ver in PROGRAM_ROMS.iter().filter(|v| given.has(&format!("{v}.2e")) && given.has(&format!("{v}.2j"))) {
+        let pair = ["2e", "2j"].map(|ext| format!("{ver}.{ext}"));
+        pair.iter().for_each(|n| drop(roms.0.insert(n.clone(), given.read(n).unwrap())));
+        let pack = convert(&roms, "pair").unwrap();
+        assert!(pack.iter().all(|(path, file)| path == "manifest.json" || *file == first[path]), "{ver}");
+        pair.iter().for_each(|n| drop(roms.0.remove(n)));
+    }
 }
 
 /// A glb's JSON and binary chunk.
@@ -238,7 +266,11 @@ fn the_glbs_are_the_python_tools() {
     let stages = manifest["stages"].as_array().unwrap();
     assert_eq!(stages.len(), theirs.as_array().unwrap().len(), "the number of stages");
     let mut same = 0;
-    for (stage, py) in stages.iter().zip(theirs.as_array().unwrap()) {
+    for (i, (stage, py)) in stages.iter().zip(theirs.as_array().unwrap()).enumerate() {
+        // the Python tool takes the eighth stage from an archive the game never loads; here it is the game's own
+        if i == 7 {
+            continue;
+        }
         let file = stage["file"].as_str().unwrap();
         for key in ["name", "file", "title", "lighting", "backdrop_scale", "faces", "triangles", "vertices", "floor"] {
             assert_eq!(stage[key], py[key], "{file}: the manifest's {key}");
@@ -259,5 +291,41 @@ fn the_glbs_are_the_python_tools() {
         same += 1;
     }
     eprintln!("{same} of {} stages decode to the same content as the Python tool's", stages.len());
-    assert_eq!(same, 13);
+    assert_eq!(same, 12);
+}
+
+#[test]
+fn the_skies_are_the_reference_scripts() {
+    let (Ok(roms), Ok(reference)) = (std::env::var("T3_ARCADE_ROMS"), std::env::var("T3_ARCADE_SKY_REF")) else {
+        eprintln!("T3_ARCADE_ROMS and T3_ARCADE_SKY_REF are not both set: the skies' parity test is skipped");
+        return;
+    };
+    let ours = convert(open(&roms).as_ref(), "skies").unwrap();
+    let mut same = 0;
+    // (the script draws no gradient: stage 3's tiles, which the game does not draw; and nothing for the black stage 6)
+    for i in (0..13).filter(|i| ![3, 6].contains(i)) {
+        let (j, pixels) = decode(&ours[&format!("assets/arcade/stage_{i:02}.glb")]);
+        let (info, px) = &pixels[j["scenes"][0]["extras"]["sky"]["image"].as_u64().unwrap() as usize];
+        let file = std::fs::File::open(Path::new(&reference).join(format!("stage_{i:02}_sky.png"))).unwrap();
+        let mut r = png::Decoder::new(std::io::BufReader::new(file)).read_info().unwrap();
+        let mut theirs = vec![0; r.output_buffer_size().unwrap()];
+        let their_info = r.next_frame(&mut theirs).unwrap();
+        assert_eq!(
+            (info.width, info.height, info.color_type, info.bit_depth),
+            (their_info.width, their_info.height, their_info.color_type, their_info.bit_depth),
+            "stage {i}"
+        );
+        if let Some(at) = px.iter().zip(&theirs).position(|(x, y)| x != y) {
+            let (p, w) = (at / 4, info.width as usize);
+            panic!(
+                "stage {i} at ({}, {}): {:?} here, {:?} in the script's",
+                p % w,
+                p / w,
+                &px[p * 4..p * 4 + 4],
+                &theirs[p * 4..p * 4 + 4]
+            );
+        }
+        same += 1;
+    }
+    assert_eq!(same, 11);
 }

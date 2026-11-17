@@ -21,12 +21,6 @@ const TILE: usize = 64;
 /// A floor entry's (tpage, v << 8 | u, clut).
 type Key = (u32, u32, u32);
 
-/// The stages lit at runtime patch their floor entries at load time. Stage 7 is the only one with several floor
-/// tiles; its two tiles of page 0x810 were resolved by matching seams against the stage's 8-bit floor TIMs
-/// (estimated, not read from the game's code): (stage, entry, the tile's VRAM x and y).
-const OVERRIDES: [(usize, Key, (usize, usize)); 2] =
-    [(7, (0x810, 0x4000, 0x196C), (0, 768)), (7, (0x810, 0x0000, 0x196F), (0, 576))];
-
 pub struct Floor {
     pub group: Group,
     /// the atlas of its tiles
@@ -39,8 +33,8 @@ fn key((w0, w1): (u32, u32)) -> Key {
     ((w0 >> 16) & 0x3BFF, w0 & 0xFFFF, w1 >> 16)
 }
 
-/// The floor of stage `stage` from its table's 100 entries, its tiles read from the stage's video memory.
-pub fn build_floor(vram: &Vram, stage: usize, entries: &[(u32, u32)]) -> Result<Floor> {
+/// The floor from a stage's table's 100 entries, its tiles read from the stage's video memory.
+pub fn build_floor(vram: &Vram, entries: &[(u32, u32)]) -> Result<Floor> {
     let (mut keys, mut tiles) = (Vec::new(), Vec::new());
     for &e in entries {
         let k @ (tpage, uv, clut) = key(e);
@@ -49,11 +43,8 @@ pub fn build_floor(vram: &Vram, stage: usize, entries: &[(u32, u32)]) -> Result<
         }
         let (px, py, div) = page_origin(tpage);
         let mut bpp = (tpage >> 7) & 3;
-        let (mut vx, mut vy) = ((px + (uv & 0xFF) as i32 / div) as usize, (py + (uv >> 8) as i32) as usize);
+        let (vx, vy) = ((px + (uv & 0xFF) as i32 / div) as usize, (py + (uv >> 8) as i32) as usize);
         let (mut cx, mut cy) = ((clut & 0x3F) as usize * 16, ((clut >> 6) & 0x3FF) as usize);
-        if let Some(o) = OVERRIDES.iter().find(|o| o.0 == stage && o.1 == k) {
-            (vx, vy) = o.2;
-        }
         // the lit stages patch these entries at runtime: fall back to the TIM's own depth and CLUT
         if let Some(r) = vram.rects.iter().find(|r| r.contains(vx as i32, vy as i32))
             && let Some(c) = r.clut
