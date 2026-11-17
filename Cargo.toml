@@ -1,0 +1,36 @@
+[package]
+name = "ok_tekken3_arcade_converter"
+version = "0.1.0"
+edition = "2024"
+description = "Converts the stages of your own Tekken 3 arcade ROM set (Namco System 12, MAME's tekken3) into a pack of arenas OpenKumite can play instead of, or beside, the PlayStation game's"
+license = "MIT"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+# the developer tool (README.md)
+name = "t3_arcade"
+path = "src/main.rs"
+
+[dependencies]
+ok_converter_common = { git = "https://github.com/openkumite/ok_converter_common", branch = "main", default-features = false }
+anyhow = "1"
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+png = "0.18"
+# the ROM set as MAME's .zip
+zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+[dev-dependencies]
+cargo-husky = { version = "1.5.0", default-features = false, features = ["user-hooks"] }
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+
+[profile.release]
+debug = 1
+
+[profile.dev]
+opt-level = 2

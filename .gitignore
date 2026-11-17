@@ -1,0 +1,8 @@
+/target
+# game ROMs and anything converted from them: never in the repository
+*.zip
+/roms
+/pack
+/export
+.DS_Store
+.claude/worktrees/
