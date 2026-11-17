@@ -123,6 +123,19 @@ fn zip_and_folder_give_the_same_pack() {
             );
         }
     }
+    // what moves: the carousel, the helicopter's two rotors, the flames of two stages (16 pictures each)
+    let moving = |stage: &str, key: &str| {
+        let glb = &first[&format!("assets/arcade/{stage}.glb")];
+        let n = u32::from_le_bytes(glb[12..16].try_into().unwrap()) as usize;
+        let j: Value = serde_json::from_slice(&glb[20..20 + n]).unwrap();
+        let flames =
+            j["images"].as_array().unwrap().iter().filter(|i| i["name"].as_str().unwrap().starts_with("flame_"));
+        let prims = j["meshes"][0]["primitives"].as_array().unwrap().iter();
+        (prims.filter(|p| !p["extras"][key].is_null()).count(), flames.count())
+    };
+    assert_eq!([moving("stage_03", "spin"), moving("stage_11", "spin")], [(1, 0), (2, 0)]);
+    assert_eq!([moving("stage_06", "frames"), moving("stage_12", "frames")], [(1, 16), (1, 16)]);
+    assert_eq!([moving("stage_00", "spin"), moving("stage_00", "frames")], [(0, 0), (0, 0)]);
     let manifest: Value = serde_json::from_slice(&first["manifest.json"]).unwrap();
     let stages = manifest["stages"].as_array().unwrap();
     assert_eq!(stages.len(), 14);

@@ -53,6 +53,7 @@ pub fn parse_tims(b: &[u8]) -> Result<Vec<Tim<'_>>> {
 }
 
 /// The image rectangle of an uploaded TIM, its depth and its CLUT's place.
+#[derive(Clone)]
 pub struct Rect {
     pub x: i32,
     pub y: i32,
@@ -72,6 +73,7 @@ pub const W: usize = 1024;
 pub const H: usize = 1024;
 
 /// The video memory a stage's TIMs are loaded into: 1024 x 1024 16-bit words.
+#[derive(Clone)]
 pub struct Vram {
     px: Vec<u16>,
     /// true where a TIM wrote

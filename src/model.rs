@@ -25,7 +25,10 @@ const MAX_ITEMS: u64 = 1 << 16;
 /// The offsets in a cell record are relative to this.
 const T: u64 = 0xC;
 
+#[derive(Clone)]
 pub struct Face {
+    /// the cell of the model's grid it is in
+    pub cell: usize,
     pub cmd: u8,
     /// 3 or 4 indices into the model's vertices (a quad's as a strip: 0-1-3-2 is its outline)
     pub idx: Vec<usize>,
@@ -39,6 +42,12 @@ pub struct Face {
 
 /// The model's vertices and faces.
 pub fn parse_stage(b: &[u8]) -> Result<(Vec<[i16; 3]>, Vec<Face>)> {
+    parse_model(b, false)
+}
+
+/// A model's vertices and faces. `object`: a stage's extra object (a carousel, a helicopter), whose untextured
+/// primitives keep their colour in the word after the header (their byte 2 is 0 all the same).
+pub fn parse_model(b: &[u8], object: bool) -> Result<(Vec<[i16; 3]>, Vec<Face>)> {
     let cells = u32_at(b, 8, "the model's cell count")?;
     if cells > MAX_CELLS {
         bail!("the model has {cells} cells");
@@ -78,7 +87,11 @@ pub fn parse_stage(b: &[u8]) -> Result<(Vec<[i16; 3]>, Vec<Face>)> {
                 q += n;
             }
             let mut col = None;
-            if prelit != 0 {
+            if object && cmd & 4 == 0 {
+                let w = word(q)?.to_le_bytes();
+                col = Some(vec![[w[0], w[1], w[2]]; n]);
+                q += 1;
+            } else if prelit != 0 {
                 let nc = if gouraud { n } else { 1 };
                 let mut c = Vec::new();
                 for j in 0..nc {
@@ -105,7 +118,7 @@ pub fn parse_stage(b: &[u8]) -> Result<(Vec<[i16; 3]>, Vec<Face>)> {
                     })
                 })
                 .collect::<Result<_>>()?;
-            faces.push(Face { cmd, idx, tex, uv, col });
+            faces.push(Face { cell: i as usize, cmd, idx, tex, uv, col });
             p += nw as u64 * 4;
         }
     }
@@ -143,6 +156,10 @@ mod tests {
         for f in &faces[1..] {
             assert_eq!((&f.idx[..], f.tex, &f.col), (&[0, 1, 2][..], None, &None));
         }
+        // an object's untextured quad: its colour, then the normal and the vertices
+        let flat_quad = [0x2800_0400, 0x0030_2010, 0x0000_0009, 0x0002_0001, 0x0003];
+        let (_, faces) = parse_model(&model(&[&flat_quad]), true).unwrap();
+        assert_eq!((&faces[0].idx[..], &faces[0].col), (&[0, 1, 2, 3][..], &Some(vec![[0x10, 0x20, 0x30]; 4])));
     }
 
     #[test]
