@@ -1,7 +1,8 @@
 //! The ROM set and what is read straight from it.
 //!
-//! Data ROMs `tet1rom{0,1,2}{l,u}` are byte-interleaved pairs forming one linear "banked" region. The game's file
-//! table lists each stage as one model file followed by a run of TIM files ([`STAGES_RAW`]).
+//! Data ROMs `tet1rom{0,1,2}{l,u}` are byte-interleaved pairs forming one linear "banked" region. The program's
+//! file table gives each stage an archive, one model file followed by texture files (runs of TIMs): twelve in the
+//! banked region, the eighth stage's in the program ROM with its texture files LZ-packed (`stages_in`).
 //!
 //! The main program (`tet*.2e`/`.2j`, byte-interleaved) is LZ-compressed in ROM; a boot table entry
 //! `{src, dst = 0x80010000}` points at it. A flag byte is read LSB-first with a leading-1 sentinel: bit 1 = a literal
@@ -9,7 +10,8 @@
 //! executable a table of 13 `{u32 index, u32 ptr}` pairs points at each stage's floor table: u32 count (128), then
 //! `{u32 tpage << 16 | v << 8 | u, u32 clut << 16}` entries, of which entries 0..99 are the floor's 10 x 10 map.
 
-use crate::{floor, u32_at};
+use crate::sky::{self, Sky};
+use crate::{bytes, floor, u32_at};
 use anyhow::{Context, Result, bail};
 use ok_converter_common::io::Vfs;
 use std::cell::RefCell;
@@ -83,76 +85,13 @@ pub const DATA_ROMS: [(&str, &str); 3] =
 pub const PROGRAM_ROMS: [&str; 7] =
     ["tet2vere1", "tet3verd", "tet1vere1", "tet2verb", "tet2vera", "tet3vera", "tet1vera"];
 
-/// (offset, size) in the banked data region, from the game's own file table. Each stage is one model file followed
-/// by its TIM texture files.
-const STAGES_RAW: [(usize, usize); 66] = [
-    (0x11d6678, 0x0c0d0),
-    (0x11e2748, 0x14864),
-    (0x11f6fac, 0x14ae4),
-    (0x120ba90, 0x14ba4),
-    (0x1220634, 0x14f84),
-    (0x12355b8, 0x14d84),
-    (0x124a33c, 0x10804),
-    (0x125ab7c, 0x0f204),
-    (0x1269d80, 0x14744),
-    (0x127e4c4, 0x14e24),
-    (0x12932e8, 0x14be4),
-    (0x12a7ecc, 0x14a04),
-    (0x12bc8d0, 0x14a04),
-    (0x12d12d4, 0x04204),
-    (0x12d550c, 0x0b104),
-    (0x12e0610, 0x14c44),
-    (0x12f5254, 0x14724),
-    (0x1309978, 0x14928),
-    (0x131e2a0, 0x14a04),
-    (0x1332ca4, 0x05ac4),
-    (0x133878c, 0x0ca4c),
-    (0x13451d8, 0x148b4),
-    (0x1359a8c, 0x14c2c),
-    (0x136e6b8, 0x13144),
-    (0x1381828, 0x0c860),
-    (0x138e088, 0x14e2c),
-    (0x13a2eb4, 0x14a04),
-    (0x13b78b8, 0x13984),
-    (0x13cb23c, 0x03184),
-    (0x13ce3f4, 0x0b79c),
-    (0x13d9b90, 0x14a44),
-    (0x13ee5d4, 0x14b68),
-    (0x140313c, 0x14c44),
-    (0x1417d80, 0x14a04),
-    (0x142c784, 0x01084),
-    (0x142d82c, 0x0db6c),
-    (0x143b398, 0x14ac4),
-    (0x144fe5c, 0x14c04),
-    (0x1464a60, 0x00844),
-    (0x14652c0, 0x0928c),
-    (0x146e54c, 0x14524),
-    (0x1482a70, 0x0ed84),
-    (0x1491838, 0x0fe3c),
-    (0x14a1674, 0x14ee4),
-    (0x14b6558, 0x14e24),
-    (0x14cb37c, 0x14e24),
-    (0x14e01a0, 0x14f04),
-    (0x14f50a4, 0x14a04),
-    (0x1509aa8, 0x14a04),
-    (0x151e4ac, 0x03184),
-    (0x152164c, 0x14e04),
-    (0x1536450, 0x14ea4),
-    (0x154b2f4, 0x0bdc4),
-    (0x15570ec, 0x0c674),
-    (0x1563760, 0x14c44),
-    (0x15783a4, 0x14a04),
-    (0x158cda8, 0x14a04),
-    (0x15a17ac, 0x14a04),
-    (0x15b61b0, 0x11884),
-    (0x15c7a50, 0x0616c),
-    (0x15cdbbc, 0x14948),
-    (0x15e2504, 0x14a04),
-    (0x15f6f2c, 0x0b064),
-    (0x1601f90, 0x14884),
-    (0x1616814, 0x14d04),
-    (0x162b518, 0x0ad44),
-];
+/// Each stage's group of files: the program's table at 0x8017C320 (the addresses here are TET2/VER.E1's), the same
+/// words in every program version.
+const STAGE_GROUPS: [u32; 13] = [0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x24, 0x1F, 0x20, 0x21, 0x22, 0x23];
+/// A file address from here on is an offset in the program ROM; below it, in the banked data region.
+const PROGRAM_FILES: u32 = 0x200_0000;
+/// The stages' archives have 3 to 9 files.
+const MAX_FILES: u32 = 64;
 
 /// The two halves of a ROM pair as one: `a`'s bytes at the even offsets, `b`'s at the odd.
 pub fn interleave(a: &[u8], b: &[u8]) -> Result<Vec<u8>> {
@@ -171,34 +110,72 @@ pub fn load_banked(roms: &dyn RomSet) -> Result<Vec<u8>> {
     Ok(bank)
 }
 
-/// One stage's files in the banked region.
-pub struct Stage<'a> {
-    pub model: &'a [u8],
-    pub tims: Vec<&'a [u8]>,
+/// One stage's files: its model, and its texture files (runs of TIMs), unpacked.
+pub struct Stage {
+    pub model: Vec<u8>,
+    pub tims: Vec<Vec<u8>>,
 }
 
-/// The stage files grouped: a file that is not a TIM starts a stage, the TIMs after it are its textures.
-pub fn group_stages(bank: &[u8]) -> Result<Vec<Stage<'_>>> {
-    let mut stages: Vec<Stage> = Vec::new();
-    for (off, size) in STAGES_RAW {
-        let file = crate::bytes(bank, off as u64, size, "a stage file")?;
-        if u32_at(file, 0, "a stage file")? != 0x10 {
-            stages.push(Stage { model: file, tims: Vec::new() });
-        } else {
-            stages.last_mut().context("a texture file before the first stage model")?.tims.push(file);
-        }
+/// The files of the archive at the address `addr`: `u32 n, n x {u32 offset (from the archive), u32 size}`.
+fn archive<'a>(bank: &'a [u8], prog: &'a [u8], addr: u32) -> Result<Vec<&'a [u8]>> {
+    let (rom, at) = match addr.checked_sub(PROGRAM_FILES) {
+        Some(o) => (prog, u64::from(o)),
+        None => (bank, u64::from(addr)),
+    };
+    let n = u32_at(rom, at, "an archive's file count")?;
+    if !(2..=MAX_FILES).contains(&n) {
+        bail!("an archive of {n} files at {addr:#x}: not a stage's");
     }
-    Ok(stages)
+    let file = |i: u64| {
+        let (o, size) =
+            (u32_at(rom, at + 4 + 8 * i, "an archive's files")?, u32_at(rom, at + 8 + 8 * i, "an archive's files")?);
+        bytes(rom, at + u64::from(o), size as usize, "a stage file")
+    };
+    (0..u64::from(n)).map(file).collect()
+}
+
+/// A stage of its archive's files: the model, then the texture files; one that is not a TIM is LZ-packed, as the
+/// program is (the stage kept in the program ROM).
+fn stage(files: &[&[u8]]) -> Result<Stage> {
+    let (model, tims) = files.split_first().context("a stage's archive is empty")?;
+    if u32_at(model, 0, "a stage's model")? == TIM {
+        bail!("a stage's first file is a texture, not its model");
+    }
+    let tim = |t: &&[u8]| {
+        let t = if u32_at(t, 0, "a stage's texture file")? == TIM { t.to_vec() } else { lz_decompress(t, 0)? };
+        if u32_at(&t, 0, "a stage's unpacked texture file")? != TIM {
+            bail!("a stage's texture file is not a TIM, packed or not");
+        }
+        Ok(t)
+    };
+    Ok(Stage { model: model.to_vec(), tims: tims.iter().map(tim).collect::<Result<_>>()? })
+}
+
+/// The 13 stages' files. The program's group table (0x801FF738 in TET2/VER.E1: 0x2C entries `{u32 pointer to a
+/// list of archive addresses, u32 count}`) is found by what it holds: the first place in the program where every
+/// stage's group is one archive of a model and its textures.
+fn stages_in(exe: &[u8], words: &[u32], bank: &[u8], prog: &[u8]) -> Result<Vec<Stage>> {
+    if !words.windows(STAGE_GROUPS.len()).any(|w| w == STAGE_GROUPS) {
+        bail!("no table of the stages' file groups in the main program");
+    }
+    let stage_at = |p: usize, g: u32| {
+        let (&ptr, &count) = (words.get(p + 2 * g as usize)?, words.get(p + 2 * g as usize + 1)?);
+        let addr = u32_at(exe, u64::from(ptr.checked_sub(EXE_BASE).filter(|_| count == 1)?), "").ok()?;
+        stage(&archive(bank, prog, addr).ok()?).ok()
+    };
+    (0..words.len())
+        .find_map(|p| STAGE_GROUPS.iter().map(|&g| stage_at(p, g)).collect())
+        .context("no table of the stages' files in the main program")
 }
 
 /// The unpacked program is 2.7 MiB; the cap keeps a broken stream from growing without end.
 const MAX_EXE: usize = 8 << 20;
 
-/// The LZ stream of the program ROM at `pos`, unpacked (the module docs have the format).
+/// The LZ stream of `src` at `pos`, unpacked (the module docs have the format).
 pub fn lz_decompress(src: &[u8], mut pos: usize) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     let mut next = || -> Result<u8> {
-        let b = *src.get(pos).context("the compressed program ends early")?;
+        let b = *src.get(pos).context("the compressed data ends early")?;
         pos += 1;
         Ok(b)
     };
@@ -214,30 +191,59 @@ pub fn lz_decompress(src: &[u8], mut pos: usize) -> Result<Vec<u8>> {
                 let v = usize::from(u16::from_be_bytes([next()?, next()?]));
                 let d = if v & 0x7FF == 0 { 0x800 } else { v & 0x7FF };
                 let n = if v >> 11 == 0 { 32 } else { v >> 11 };
-                let s = out.len().checked_sub(d).context("the compressed program refers back before its start")?;
+                let s = out.len().checked_sub(d).context("the compressed data refers back before its start")?;
                 // (byte by byte: the copy may overlap what it writes)
                 for k in s..s + n {
-                    let b = *out.get(k).context("the compressed program refers past its end")?;
+                    let b = *out.get(k).context("the compressed data refers past its end")?;
                     out.push(b);
                 }
             }
             f >>= 1;
         }
         if out.len() > MAX_EXE {
-            bail!("the compressed program unpacks to more than {MAX_EXE} bytes");
+            bail!("the compressed data unpacks to more than {MAX_EXE} bytes");
         }
     }
 }
 
 /// Where the program ROM is mapped, and where its executable is unpacked to.
 const ROM_BASE: u32 = 0x1FC0_0000;
-const EXE_BASE: u32 = 0x8001_0000;
+pub(crate) const EXE_BASE: u32 = 0x8001_0000;
+/// The first word of a TIM.
+const TIM: u32 = 0x10;
 
 /// The 100 `(w0, w1)` entries of a stage's floor map.
 pub type FloorTable = Vec<(u32, u32)>;
 
-/// The floor tables of the 13 stages in one program ROM (both halves interleaved).
-fn floor_tables_in(prog: &[u8]) -> Result<Vec<FloorTable>> {
+/// The floor tables of the 13 stages.
+fn floor_tables_in(exe: &[u8], words: &[u32]) -> Result<Vec<FloorTable>> {
+    let in_exe = |p: u32| p.checked_sub(EXE_BASE).is_some_and(|o| (o as usize) < exe.len());
+    let table = words
+        .windows(26)
+        .find(|t| t.as_chunks::<2>().0.iter().enumerate().all(|(k, &[i, p])| i as usize == k && in_exe(p)))
+        .context("no table of the stages' floors in the main program")?;
+    let mut tables = Vec::new();
+    for ptr in table.iter().skip(1).step_by(2) {
+        let o = u64::from(ptr - EXE_BASE) + 4;
+        let entry = |j: u64| -> Result<(u32, u32)> {
+            Ok((u32_at(exe, o + 8 * j, "a floor table")?, u32_at(exe, o + 8 * j + 4, "a floor table")?))
+        };
+        tables.push((0..floor::CELLS as u64).map(entry).collect::<Result<_>>()?);
+    }
+    Ok(tables)
+}
+
+/// What is read through one program ROM pair: each of the 13 stages' files, floor table and sky.
+pub struct Program {
+    /// the pair's name
+    pub name: &'static str,
+    pub stages: Vec<Stage>,
+    pub floors: Vec<FloorTable>,
+    pub skies: Vec<Sky>,
+}
+
+/// The stages of one program ROM (both halves interleaved) and the banked data region.
+fn program_in(name: &'static str, bank: &[u8], prog: &[u8]) -> Result<Program> {
     let src = (0..0x40000u64)
         .step_by(4)
         .find_map(|p| {
@@ -248,33 +254,26 @@ fn floor_tables_in(prog: &[u8]) -> Result<Vec<FloorTable>> {
         .context("no boot table entry for the main program")?;
     let exe = lz_decompress(prog, src)?;
     let words: Vec<u32> = exe.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c)).collect();
-    let in_exe = |p: u32| p.checked_sub(EXE_BASE).is_some_and(|o| (o as usize) < exe.len());
-    let table = words
-        .windows(26)
-        .find(|t| t.as_chunks::<2>().0.iter().enumerate().all(|(k, &[i, p])| i as usize == k && in_exe(p)))
-        .context("no table of the stages' floors in the main program")?;
-    let mut tables = Vec::new();
-    for ptr in table.iter().skip(1).step_by(2) {
-        let o = u64::from(ptr - EXE_BASE) + 4;
-        let entry = |j: u64| -> Result<(u32, u32)> {
-            Ok((u32_at(&exe, o + 8 * j, "a floor table")?, u32_at(&exe, o + 8 * j + 4, "a floor table")?))
-        };
-        tables.push((0..floor::CELLS as u64).map(entry).collect::<Result<_>>()?);
-    }
-    Ok(tables)
+    Ok(Program {
+        name,
+        stages: stages_in(&exe, &words, bank, prog)?,
+        floors: floor_tables_in(&exe, &words)?,
+        skies: sky::parse_tables(&exe)?,
+    })
 }
 
-/// The floor tables of the first program ROM pair of the set that has them, and the pair's name.
-pub fn load_floor_tables(roms: &dyn RomSet) -> Result<(&'static str, Vec<FloorTable>)> {
+/// The stages read through the first program ROM pair of the set that has its tables. Every pair of
+/// [`PROGRAM_ROMS`] does: the tables are found by their contents, not at one version's addresses.
+pub fn load_program(roms: &dyn RomSet) -> Result<Program> {
+    let bank = load_banked(roms)?;
     let mut last = None;
     for ver in PROGRAM_ROMS {
         let (e, j) = (format!("{ver}.2e"), format!("{ver}.2j"));
         if !roms.has(&e) || !roms.has(&j) {
             continue;
         }
-        let tables = (|| floor_tables_in(&interleave(&roms.read(&e)?, &roms.read(&j)?)?))();
-        match tables {
-            Ok(t) => return Ok((ver, t)),
+        match (|| program_in(ver, &bank, &interleave(&roms.read(&e)?, &roms.read(&j)?)?))() {
+            Ok(p) => return Ok(p),
             Err(err) => last = Some(err.context(format!("{e} and {j}"))),
         }
     }
@@ -329,6 +328,48 @@ mod tests {
             *c = [0x02, 0x00, 0x01];
         }
         assert!(lz_decompress(&bomb, 0).is_err(), "too large");
+    }
+
+    fn le(words: &[u32]) -> Vec<u8> {
+        words.iter().flat_map(|w| w.to_le_bytes()).collect()
+    }
+
+    #[test]
+    fn stage_files() {
+        // an archive of a model and a TIM file at 8 of the banked region; in the program ROM at 4, the same with
+        // the TIM file packed (flags 0b1_1111: four literals)
+        let bank = le(&[0, 0, 2, 20, 8, 28, 4, 0x41, 0x100, TIM]);
+        let mut prog = le(&[0, 2, 20, 4, 24, 6, 0x41]);
+        prog.extend([0x1F, 0x10, 0, 0, 0, 0]);
+        let files = archive(&bank, &prog, 8).unwrap();
+        assert_eq!(files, [&le(&[0x41, 0x100])[..], &le(&[TIM])[..]]);
+        for addr in [8, PROGRAM_FILES + 4] {
+            let st = stage(&archive(&bank, &prog, addr).unwrap()).unwrap();
+            assert_eq!((st.model[0], &st.tims), (0x41, &vec![le(&[TIM])]), "{addr:#x}");
+        }
+        // an address outside, a count beyond the cap, a file past the end; a TIM first, a texture file that is none
+        assert!(archive(&bank, &prog, 0x100).is_err() && archive(&bank, &prog, PROGRAM_FILES + 0x100).is_err());
+        assert!(archive(&le(&[MAX_FILES + 1]), &prog, 0).is_err());
+        assert!(archive(&bank[..36], &prog, 8).is_err());
+        assert!(stage(&[&le(&[TIM]), &le(&[TIM])]).is_err());
+        assert!(stage(&[&le(&[0x41]), &[0x1F, 0x11, 0, 0, 0, 0]]).is_err());
+        assert!(stage(&[&le(&[0x41]), &[0x1F, 0x10]]).is_err() && stage(&[]).is_err());
+
+        // the program: the stage groups' table, 3 words of something else, then the group table (every group one
+        // archive: the list at word 16 for all but group 0x24, whose list at word 17 names the program ROM's)
+        let mut words = STAGE_GROUPS.to_vec();
+        words.extend([7, 7, 7, 8, PROGRAM_FILES + 4, 7]);
+        for g in 0..0x2C {
+            words.extend([EXE_BASE + if g == 0x24 { 17 * 4 } else { 16 * 4 }, 1]);
+        }
+        let exe = le(&words);
+        let stages = stages_in(&exe, &words, &bank, &prog).unwrap();
+        assert_eq!(stages.len(), 13);
+        assert!(stages.iter().all(|s| s.model == le(&[0x41, 0x100]) && s.tims == [le(&[TIM])]));
+        // no table of the stages' groups; groups of two archives
+        assert!(stages_in(&exe, &words[13..], &bank, &prog).is_err());
+        words[19..].as_chunks_mut::<2>().0.iter_mut().for_each(|g| g[1] = 2);
+        assert!(stages_in(&exe, &words, &bank, &prog).is_err());
     }
 
     #[test]

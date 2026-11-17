@@ -1,17 +1,27 @@
 //! A stage as a glTF 2.0 binary: a root node named after the stage with two children, "backdrop" (the stage model,
 //! one primitive per material) and "floor".
 //!
-//! The game draws the stage model as a backdrop centred on the camera at roughly 1/9.6 of world scale (measured from
-//! several frames: 9.3-9.9), so the backdrop node has that scale; the floor is at true scale. Vertices are not
-//! indexed; a pre-lit stage's materials are unlit (`KHR_materials_unlit`), its light in the vertex colours.
+//! The backdrop node has the scale the Python tool measured from frames of the game, 9.6 ([`BACKDROP_SCALE`]; the
+//! game's own is 10, [`GAME_SCALE`]); the floor is at true scale. Vertices are not indexed; a pre-lit stage's
+//! materials are unlit (`KHR_materials_unlit`), its light in the vertex colours. [`write_game`] writes the stage
+//! as the game places it.
 
 use crate::floor::Floor;
 use crate::stage::Built;
 use anyhow::{Result, bail};
 use serde_json::{Value, json};
 
-/// Stage model units to world units.
+/// Stage model units to world units in the plain glb: the Python tool's measure, kept so that the glb stays the
+/// Python tool's. The game's value is 10 ([`GAME_SCALE`]).
 pub const BACKDROP_SCALE: f64 = 9.6;
+
+/// How the game places the stage model (routine 0x801D9118 of TET2/VER.E1): one model unit is 10 world units; its
+/// Y axis is scaled by 95/100, on stage 3 by 7/10 more; its origin is 50 world units along the model's +Y, which
+/// is down (table 0x8017C454: 50 for every stage).
+pub const GAME_SCALE: f64 = 10.0;
+const GAME_Y_SCALE: f64 = 0.95;
+const GAME_Y_SCALE_STAGE_3: f64 = 0.665;
+const GAME_Y: f64 = -50.0 * crate::SCALE;
 
 #[derive(Debug)]
 pub struct Material {
@@ -150,20 +160,29 @@ pub fn write(name: &str, st: &Built, floor: &Floor) -> Result<Vec<u8>> {
 const FLOOR_PERIOD: f64 = crate::floor::SIZE_M;
 const FLOOR_COPIES: i32 = 4;
 
-/// The stage as OpenKumite's stage glbs are laid out (ok_tekken3_converter's `export_stages`), `title` its scene's
-/// name:
+/// Stage `stage` as OpenKumite's stage glbs are laid out (ok_tekken3_converter's `export_stages`), `title` its
+/// scene's name, `sky` its sky's picture (a PNG) and placement (`sky::build`):
 ///
-/// - node `sky`: the stage model at world scale (the backdrop's scale in its vertices), one primitive per image;
-///   an untextured face draws a white image's texel. Semi-transparent faces are left out: the game's stages have
-///   none, and it would draw them solid.
+/// - node `sky`: the stage model as the game places it ([`GAME_SCALE`], the Y scale and the height in its
+///   vertices), one primitive per image; an untextured face draws a white image's texel. Semi-transparent faces are
+///   left out: the game's stages have none, and it would draw them solid.
 /// - node `floor`: the floor map's copies `floor_I_J`, one period apart.
-/// - the scene's extras: `floor_period` (m); `drum: "model"`: the sky is the stage's model, not a drum of panels.
-///   The game keeps it centred on the fighters' midpoint (x, z), its ground the floor's, and draws it after the
-///   floor without depth, far faces first, both sides of a face.
+/// - the scene's extras: `floor_period` (m); `drum: "model"`: the sky node is the stage's model, not a drum of
+///   panels. The game keeps it centred on the fighters' midpoint (x, z) and draws it after the floor without
+///   depth, far faces first. `drum_cull: true`: back faces are not drawn. The game culls by the winding on the
+///   screen (NCLIP: it draws a face whose vertices run clockwise there); here the triangles are wound as glTF has
+///   it, counter-clockwise seen from the front. `sky` (absent on the black stage): the panorama behind everything,
+///   `image` the index of the image named `sky` (no mesh uses it; the last image), the rest as `sky::placement`.
 ///
-/// Every primitive has positions, texture coordinates, colours (the light of a pre-lit stage; a lit one's are its
-/// faces' own) and indices.
-pub fn write_game(title: &str, st: &Built, floor: &Floor) -> Result<Vec<u8>> {
+/// Every primitive has positions, texture coordinates, colours (the light of a pre-lit stage; white on a lit one,
+/// which the game draws with its textures as they are) and indices.
+pub fn write_game(
+    stage: usize,
+    title: &str,
+    st: &Built,
+    floor: &Floor,
+    sky: Option<&(Vec<u8>, Value)>,
+) -> Result<Vec<u8>> {
     let mut w = Writer::default();
     let (mut images, mut textures) = (Vec::new(), Vec::new());
     let white = crate::atlas::png(1, 1, &[255; 4])?;
@@ -175,27 +194,42 @@ pub fn write_game(title: &str, st: &Built, floor: &Floor) -> Result<Vec<u8>> {
         w.materials.push(json!({"name": iname, "doubleSided": true, "alphaMode": "MASK", "alphaCutoff": 0.5, "pbrMetallicRoughness": pbr}));
     }
     let (floor_image, white_image) = (st.images.len(), st.images.len() + 1);
-    let primitive = |w: &mut Writer, image: usize, g: &Group, scale: f64| -> Result<Value> {
-        let pos: Vec<[f64; 3]> = g.pos.iter().map(|p| p.map(|c| c * scale)).collect();
+    // `flip`: the model's triangles are wound clockwise seen from the front (the PlayStation's way); their second
+    // and third corners change places
+    let primitive = |w: &mut Writer, image: usize, g: &Group, pos: Vec<[f64; 3]>, flip: bool| -> Result<Value> {
         let uv = if image == white_image { vec![[0.5; 2]; pos.len()] } else { g.uv.clone() };
         if uv.len() != pos.len() || g.col.len() != pos.len() {
             bail!("a face without its texture coordinates or colours");
         }
-        let indices: Vec<u8> = (0..u32::try_from(pos.len())?).flat_map(u32::to_le_bytes).collect();
+        let corner = |i: u32| match i % 3 {
+            1 if flip => i + 1,
+            2 if flip => i - 1,
+            _ => i,
+        };
+        let indices: Vec<u8> = (0..u32::try_from(pos.len())?).map(corner).flat_map(u32::to_le_bytes).collect();
         let view = w.view(&indices, Some(34963));
         w.accessors.push(json!({"bufferView": view, "componentType": 5125, "count": pos.len(), "type": "SCALAR"}));
         let indices = w.accessors.len() - 1;
         let attrs = json!({"POSITION": w.accessor(&pos, true), "TEXCOORD_0": w.accessor(&uv, false), "COLOR_0": w.accessor(&g.col, false)});
         Ok(json!({"attributes": attrs, "indices": indices, "material": image, "mode": 4}))
     };
-    let mut sky = Vec::new();
+    let y_scale = GAME_SCALE * if stage == 3 { GAME_Y_SCALE_STAGE_3 } else { GAME_Y_SCALE };
+    let mut model = Vec::new();
     for (m, g) in st.groups.iter().filter(|(m, _)| !m.semi) {
-        sky.push(primitive(&mut w, m.tex.unwrap_or(white_image), g, BACKDROP_SCALE)?);
+        let pos = g.pos.iter().map(|p| [p[0] * GAME_SCALE, p[1] * y_scale + GAME_Y, p[2] * GAME_SCALE]).collect();
+        model.push(primitive(&mut w, m.tex.unwrap_or(white_image), g, pos, true)?);
     }
-    if sky.is_empty() {
+    if model.is_empty() {
         bail!("the stage model has nothing to draw");
     }
-    let floor = primitive(&mut w, floor_image, &floor.group, 1.0)?;
+    let floor = primitive(&mut w, floor_image, &floor.group, floor.group.pos.clone(), false)?;
+    let mut extras = json!({"floor_period": [FLOOR_PERIOD, FLOOR_PERIOD], "drum": "model", "drum_cull": true, "background_rgb": [0, 0, 0]});
+    if let Some((png, placement)) = sky {
+        let mut placement = placement.clone();
+        placement["image"] = images.len().into();
+        images.push(json!({"bufferView": w.view(png, None), "mimeType": "image/png", "name": "sky"}));
+        extras["sky"] = placement;
+    }
     let mut nodes = vec![json!({"name": "sky", "mesh": 0}), json!({"name": "floor", "children": []})];
     let mut copies = Vec::new();
     for j in -FLOOR_COPIES..=FLOOR_COPIES {
@@ -206,13 +240,12 @@ pub fn write_game(title: &str, st: &Built, floor: &Floor) -> Result<Vec<u8>> {
         }
     }
     nodes[1]["children"] = json!(copies);
-    let extras = json!({"floor_period": [FLOOR_PERIOD, FLOOR_PERIOD], "drum": "model", "background_rgb": [0, 0, 0]});
     let gltf = json!({
         "asset": {"version": "2.0", "generator": env!("CARGO_PKG_NAME")},
         "scene": 0,
         "scenes": [{"name": title, "nodes": [0, 1], "extras": extras}],
         "nodes": nodes,
-        "meshes": [{"name": "sky", "primitives": sky}, {"name": "floor", "primitives": [floor]}],
+        "meshes": [{"name": "sky", "primitives": model}, {"name": "floor", "primitives": [floor]}],
         "materials": w.materials,
         "textures": textures,
         "images": images,
