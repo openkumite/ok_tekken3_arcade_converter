@@ -11,6 +11,9 @@
 //!                                   (`sky::placement`)}, ...]}
 //! stages/stage_NN.glb  each stage as a glb (`glb`: metres, Y up), as the Python tool this converter comes from
 //!                      wrote it: to look at in any glTF viewer
+//! stages/hidden.glb, assets/arcade/hidden.glb
+//!                      an arena in the ROM set that no stage of the game uses (`"replaces": null`), when the
+//!                      set has it
 //! assets/arcade/stage_NN.glb
 //!                      the same stage laid out as OpenKumite's stages (`glb::write_game`); `assets/` is the folder
 //!                      of a pack's files the game reads as they are
@@ -26,7 +29,7 @@ use ok_converter_common::io::{Ctx, Vfs};
 use serde_json::{Value, json};
 
 /// The pack's layout and contents; another one is converted again.
-pub const FORMAT: i64 = 2;
+pub const FORMAT: i64 = 3;
 /// What a pack's manifest names it.
 pub const KIND: &str = "t3arcade";
 /// The folder of the pack's files the game reads as they are (as the other packs').
@@ -67,6 +70,11 @@ const REPLACES: [Option<u32>; 13] = [
     Some(12),
 ];
 
+/// The hidden arena's name in the pack (`assets/arcade/hidden.glb`), its title, and the stage it is laid out as.
+pub const HIDDEN: &str = "hidden";
+const HIDDEN_TITLE: &str = "Circular stone arena (in the ROM set, used by no stage)";
+const HIDDEN_AS: usize = 7;
+
 /// Converts every stage of the ROM set, giving each one's manifest entry, glb and the game's glb to `each` in turn; returns the
 /// name of the program ROM pair they were read through.
 pub fn stages(roms: &dyn RomSet, each: &mut dyn FnMut(Value, Vec<u8>, Vec<u8>) -> Result<()>) -> Result<&'static str> {
@@ -75,13 +83,25 @@ pub fn stages(roms: &dyn RomSet, each: &mut dyn FnMut(Value, Vec<u8>, Vec<u8>) -
     if n != [TITLES.len(); 3] {
         bail!("{n:?} stages' files, floors and skies in the program, not {} of each", TITLES.len());
     }
-    let tables = program.stages.iter().zip(&program.floors).zip(&program.skies);
-    for (i, (((stage, entries), sky), (title, replaces))) in tables.zip(TITLES.iter().zip(REPLACES)).enumerate() {
-        let name = format!("stage_{i:02}");
+    let tables = program.stages.iter().zip(&program.floors).zip(&program.skies).zip(TITLES.iter().zip(REPLACES));
+    let named = tables.enumerate().map(|(i, (((stage, entries), sky), (title, replaces)))| {
+        (format!("stage_{i:02}"), i, stage, entries, Some(sky), *title, replaces)
+    });
+    // the hidden arena: laid out as the stage in whose place its files are; no floor table or sky of its own in the
+    // program. shortcut: that stage's floor table, its fourth tile (v 0x40 of the lower page: not a floor's texture
+    // here) taken a page up, where the arena's fourth floor tile is: by look, not from the program; no sky: its
+    // walls close the view
+    let floor: Option<Vec<_>> = program.floors.get(HIDDEN_AS).map(|t| {
+        t.iter().map(|&(w0, w1)| if w0 & 0xFF00 == 0x4000 { (w0 & !0x0010_0000, w1) } else { (w0, w1) }).collect()
+    });
+    let hidden = program.hidden.as_ref().zip(floor.as_ref());
+    let hidden =
+        hidden.map(|(stage, entries)| (HIDDEN.to_string(), HIDDEN_AS, stage, entries, None, HIDDEN_TITLE, None));
+    for (name, i, stage, entries, sky, title, replaces) in named.chain(hidden) {
         let (entry, glb, game) = (|| {
             let st = build_stage(stage)?;
             let floor = build_floor(&st.vram, entries)?;
-            let sky = sky::build(i, sky, &st.vram)?;
+            let sky = sky.map(|sky| sky::build(i, sky, &st.vram)).transpose()?.flatten();
             let entry = json!({
                 "name": name,
                 "file": format!("stages/{name}.glb"),
@@ -99,7 +119,7 @@ pub fn stages(roms: &dyn RomSet, each: &mut dyn FnMut(Value, Vec<u8>, Vec<u8>) -
             let game = glb::write_game(i, title, &st, &floor, sky.as_ref())?;
             Ok::<_, anyhow::Error>((entry, glb::write(&name, &st, &floor)?, game))
         })()
-        .with_context(|| format!("stage {i}"))?;
+        .with_context(|| name.clone())?;
         each(entry, glb, game)?;
     }
     Ok(program.name)

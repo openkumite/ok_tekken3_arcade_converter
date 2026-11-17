@@ -88,6 +88,9 @@ pub const PROGRAM_ROMS: [&str; 7] =
 /// Each stage's group of files: the program's table at 0x8017C320 (the addresses here are TET2/VER.E1's), the same
 /// words in every program version.
 const STAGE_GROUPS: [u32; 13] = [0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x24, 0x1F, 0x20, 0x21, 0x22, 0x23];
+/// The group of an arena no stage of the game uses (a circular stone arena; where the eighth stage's group would be
+/// in the stages' order).
+const HIDDEN_GROUP: u32 = 0x1E;
 /// A file address from here on is an offset in the program ROM; below it, in the banked data region.
 const PROGRAM_FILES: u32 = 0x200_0000;
 /// The stages' archives have 3 to 9 files.
@@ -153,8 +156,8 @@ fn stage(files: &[&[u8]]) -> Result<Stage> {
 
 /// The 13 stages' files. The program's group table (0x801FF738 in TET2/VER.E1: 0x2C entries `{u32 pointer to a
 /// list of archive addresses, u32 count}`) is found by what it holds: the first place in the program where every
-/// stage's group is one archive of a model and its textures.
-fn stages_in(exe: &[u8], words: &[u32], bank: &[u8], prog: &[u8]) -> Result<Vec<Stage>> {
+/// stage's group is one archive of a model and its textures. With them, the hidden arena, if its group is one too.
+fn stages_in(exe: &[u8], words: &[u32], bank: &[u8], prog: &[u8]) -> Result<(Vec<Stage>, Option<Stage>)> {
     if !words.windows(STAGE_GROUPS.len()).any(|w| w == STAGE_GROUPS) {
         bail!("no table of the stages' file groups in the main program");
     }
@@ -164,7 +167,9 @@ fn stages_in(exe: &[u8], words: &[u32], bank: &[u8], prog: &[u8]) -> Result<Vec<
         stage(&archive(bank, prog, addr).ok()?).ok()
     };
     (0..words.len())
-        .find_map(|p| STAGE_GROUPS.iter().map(|&g| stage_at(p, g)).collect())
+        .find_map(|p| {
+            Some((STAGE_GROUPS.iter().map(|&g| stage_at(p, g)).collect::<Option<_>>()?, stage_at(p, HIDDEN_GROUP)))
+        })
         .context("no table of the stages' files in the main program")
 }
 
@@ -238,6 +243,8 @@ pub struct Program {
     /// the pair's name
     pub name: &'static str,
     pub stages: Vec<Stage>,
+    /// the arena no stage uses
+    pub hidden: Option<Stage>,
     pub floors: Vec<FloorTable>,
     pub skies: Vec<Sky>,
 }
@@ -254,12 +261,8 @@ fn program_in(name: &'static str, bank: &[u8], prog: &[u8]) -> Result<Program> {
         .context("no boot table entry for the main program")?;
     let exe = lz_decompress(prog, src)?;
     let words: Vec<u32> = exe.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c)).collect();
-    Ok(Program {
-        name,
-        stages: stages_in(&exe, &words, bank, prog)?,
-        floors: floor_tables_in(&exe, &words)?,
-        skies: sky::parse_tables(&exe)?,
-    })
+    let (stages, hidden) = stages_in(&exe, &words, bank, prog)?;
+    Ok(Program { name, stages, hidden, floors: floor_tables_in(&exe, &words)?, skies: sky::parse_tables(&exe)? })
 }
 
 /// The stages read through the first program ROM pair of the set that has its tables. Every pair of
@@ -363,8 +366,9 @@ mod tests {
             words.extend([EXE_BASE + if g == 0x24 { 17 * 4 } else { 16 * 4 }, 1]);
         }
         let exe = le(&words);
-        let stages = stages_in(&exe, &words, &bank, &prog).unwrap();
+        let (stages, hidden) = stages_in(&exe, &words, &bank, &prog).unwrap();
         assert_eq!(stages.len(), 13);
+        assert!(hidden.is_some());
         assert!(stages.iter().all(|s| s.model == le(&[0x41, 0x100]) && s.tims == [le(&[TIM])]));
         // no table of the stages' groups; groups of two archives
         assert!(stages_in(&exe, &words[13..], &bank, &prog).is_err());

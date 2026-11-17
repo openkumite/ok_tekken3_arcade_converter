@@ -29,7 +29,7 @@ addresses). The other files of the set are not read.
 A pack:
 
 ```text
-manifest.json                {"pack": "t3arcade", "format": 2, "source": {"program": ...}, "stages": [...]}
+manifest.json                {"pack": "t3arcade", "format": 3, "source": {"program": ...}, "stages": [...]}
 stages/stage_NN.glb          each stage as a plain glb (a "backdrop" node and a "floor" node): to look at
 assets/arcade/stage_NN.glb   the same stage laid out as OpenKumite's stages: what the game reads
 ```
@@ -40,6 +40,11 @@ colours; `lit`: the arcade game lights it as it draws), `backdrop_scale` (of the
 `vertices`, `floor`, `sky` (how the game places the sky's picture; `null` on the stage whose sky is black).
 
 The 13 stages are in the PlayStation game's order, so stage N replaces its stage N: the same place by look.
+
+The ROM set also keeps an arena no stage of the game uses, a circular stone arena, where the eighth stage's files
+would be in the stages' order. It is converted as `hidden` (`stages/hidden.glb`, `assets/arcade/hidden.glb`,
+`"replaces": null`), laid out as the eighth stage with that stage's floor table (one tile of it moved to the arena's own fourth floor
+tile, by look) and no sky: the program has neither for it.
 
 The game's glb has the stage's model as the arcade game places it (one model unit is 10 world units, its height
 scaled by 0.95, 5 cm under the floor), its triangles counter-clockwise seen from the front (`drum_cull` in the

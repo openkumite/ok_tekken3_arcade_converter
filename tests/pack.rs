@@ -1,5 +1,5 @@
 //! The pack end to end. Without the ROM set: zero-filled ROMs give an error. With it (`T3_ARCADE_ROMS`: the .zip or
-//! the folder): a zip and a folder give the same pack, twice the same bytes, 13 stages (the game's glbs laid out as
+//! the folder): a zip and a folder give the same pack, twice the same bytes, 13 stages and the hidden arena (the game's glbs laid out as
 //! its stages), the same through every program ROM pair of the set; with the Python tool's export too
 //! (`T3_ARCADE_PY_EXPORT`: the folder t3_stage_export.py wrote), every glb but the eighth stage's decodes to the
 //! same content; with the reference skies (`T3_ARCADE_SKY_REF`: the folder of `stage_NN_sky.png` the research
@@ -85,7 +85,7 @@ fn zip_and_folder_give_the_same_pack() {
     };
     let given = open(&path);
     let first = convert(given.as_ref(), "given").unwrap();
-    assert_eq!(first.len(), 27, "13 stages, each twice, and the manifest");
+    assert_eq!(first.len(), 29, "13 stages and the hidden arena, each twice, and the manifest");
     // the game's glb of each: its sky and its floor's copies, every primitive drawn by index with a texture
     for (path, glb) in first.iter().filter(|f| f.0.starts_with("assets/")) {
         let n = u32::from_le_bytes(glb[12..16].try_into().unwrap()) as usize;
@@ -104,7 +104,7 @@ fn zip_and_folder_give_the_same_pack() {
         );
         // the sky: the last image, of no texture; the black stage has none
         let (images, sky) = (j["images"].as_array().unwrap(), &extras["sky"]);
-        assert_eq!(sky.is_null(), path.ends_with("stage_06.glb"), "{path}");
+        assert_eq!(sky.is_null(), path.ends_with("stage_06.glb") || path.ends_with("hidden.glb"), "{path}");
         assert_eq!(images.len(), j["textures"].as_array().unwrap().len() + usize::from(!sky.is_null()), "{path}");
         if !sky.is_null() {
             assert_eq!(
@@ -125,7 +125,8 @@ fn zip_and_folder_give_the_same_pack() {
     }
     let manifest: Value = serde_json::from_slice(&first["manifest.json"]).unwrap();
     let stages = manifest["stages"].as_array().unwrap();
-    assert_eq!(stages.len(), 13);
+    assert_eq!(stages.len(), 14);
+    assert_eq!((&stages[13]["name"], &stages[13]["replaces"]), (&"hidden".into(), &Value::Null));
     assert_eq!(stages.iter().filter(|s| s["sky"].is_object()).count(), 12);
     assert_eq!(stages[11]["sky"]["min_y"], -192);
     assert_eq!(convert(given.as_ref(), "again").unwrap(), first, "converting twice");
@@ -263,7 +264,11 @@ fn the_glbs_are_the_python_tools() {
     let manifest: Value = serde_json::from_slice(&ours["manifest.json"]).unwrap();
     let theirs: Value =
         serde_json::from_slice(&std::fs::read(Path::new(&export).join("stages/manifest.json")).unwrap()).unwrap();
-    let stages = manifest["stages"].as_array().unwrap();
+    // the hidden arena is what the Python tool has as its eighth stage: the same counts
+    let (hidden, stages) = manifest["stages"].as_array().unwrap().split_last().unwrap();
+    for key in ["lighting", "faces", "triangles", "vertices", "floor"] {
+        assert_eq!(hidden[key], theirs[7][key], "the hidden arena: the manifest's {key}");
+    }
     assert_eq!(stages.len(), theirs.as_array().unwrap().len(), "the number of stages");
     let mut same = 0;
     for (i, (stage, py)) in stages.iter().zip(theirs.as_array().unwrap()).enumerate() {
