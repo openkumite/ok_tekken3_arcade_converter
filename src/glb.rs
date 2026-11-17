@@ -7,6 +7,7 @@
 //! as the game places it.
 
 use crate::floor::Floor;
+use crate::objects::Layer;
 use crate::stage::Built;
 use anyhow::{Result, bail};
 use serde_json::{Value, json};
@@ -164,8 +165,12 @@ const FLOOR_COPIES: i32 = 4;
 /// scene's name, `sky` its sky's picture (a PNG) and placement (`sky::build`):
 ///
 /// - node `sky`: the stage model as the game places it ([`GAME_SCALE`], the Y scale and the height in its
-///   vertices), one primitive per image; an untextured face draws a white image's texel. Semi-transparent faces are
-///   left out: the game's stages have none, and it would draw them solid.
+///   vertices), its `layers` in the order the game draws them (far first), one primitive per image of each; an
+///   untextured face draws a white image's texel. Semi-transparent faces are left out: the game's stages have
+///   none, and it would draw them solid. A primitive that moves says how in its extras: `spin` (`pivot`, metres;
+///   `axis`; `rate`, radians a frame of 1/60 s: it turns about the line through the pivot along the axis), or
+///   `frames` and `step` (a flame: its image and the `frames - 1` after it follow one another, each shown for
+///   `step` frames).
 /// - node `floor`: the floor map's copies `floor_I_J`, one period apart.
 /// - the scene's extras: `floor_period` (m); `drum: "model"`: the sky node is the stage's model, not a drum of
 ///   panels. The game keeps it centred on the fighters' midpoint (x, z) and draws it after the floor without
@@ -179,21 +184,23 @@ const FLOOR_COPIES: i32 = 4;
 pub fn write_game(
     stage: usize,
     title: &str,
-    st: &Built,
+    layers: &[Layer],
     floor: &Floor,
     sky: Option<&(Vec<u8>, Value)>,
 ) -> Result<Vec<u8>> {
     let mut w = Writer::default();
     let (mut images, mut textures) = (Vec::new(), Vec::new());
     let white = crate::atlas::png(1, 1, &[255; 4])?;
-    let pngs = st.images.iter().map(|(n, p)| (n.as_str(), p)).chain([("floor", &floor.png), ("white", &white)]);
+    let pngs = layers.iter().flat_map(|l| &l.built.images).map(|(n, p)| (n.as_str(), p));
+    let pngs = pngs.chain([("floor", &floor.png), ("white", &white)]);
     for (i, (iname, png)) in pngs.enumerate() {
         images.push(json!({"bufferView": w.view(png, None), "mimeType": "image/png", "name": iname}));
         textures.push(json!({"source": i, "sampler": if iname.starts_with("tile") { 1 } else { 0 }}));
         let pbr = json!({"baseColorTexture": {"index": i}, "metallicFactor": 0.0, "roughnessFactor": 1.0});
         w.materials.push(json!({"name": iname, "doubleSided": true, "alphaMode": "MASK", "alphaCutoff": 0.5, "pbrMetallicRoughness": pbr}));
     }
-    let (floor_image, white_image) = (st.images.len(), st.images.len() + 1);
+    let floor_image = layers.iter().map(|l| l.built.images.len()).sum::<usize>();
+    let white_image = floor_image + 1;
     // `flip`: the model's triangles are wound clockwise seen from the front (the PlayStation's way); their second
     // and third corners change places
     let primitive = |w: &mut Writer, image: usize, g: &Group, pos: Vec<[f64; 3]>, flip: bool| -> Result<Value> {
@@ -214,10 +221,22 @@ pub fn write_game(
         Ok(json!({"attributes": attrs, "indices": indices, "material": image, "mode": 4}))
     };
     let y_scale = GAME_SCALE * if stage == 3 { GAME_Y_SCALE_STAGE_3 } else { GAME_Y_SCALE };
-    let mut model = Vec::new();
-    for (m, g) in st.groups.iter().filter(|(m, _)| !m.semi) {
-        let pos = g.pos.iter().map(|p| [p[0] * GAME_SCALE, p[1] * y_scale + GAME_Y, p[2] * GAME_SCALE]).collect();
-        model.push(primitive(&mut w, m.tex.unwrap_or(white_image), g, pos, true)?);
+    let place = |p: &[f64; 3]| [p[0] * GAME_SCALE, p[1] * y_scale + GAME_Y, p[2] * GAME_SCALE];
+    let (mut model, mut first_image) = (Vec::new(), 0);
+    for l in layers {
+        for (m, g) in l.built.groups.iter().filter(|(m, _)| !m.semi) {
+            let image = m.tex.map_or(white_image, |t| first_image + t);
+            let mut p = primitive(&mut w, image, g, g.pos.iter().map(place).collect(), true)?;
+            // shortcut: the turn's axis is kept as it is under the model's Y scale (right for an upright axis, a
+            // little off for the tilted helicopter's rotors); upgrade: the Y scale as a node's, the turn inside it
+            if let Some(s) = &l.spin {
+                p["extras"] = json!({"spin": {"pivot": place(&s.pivot), "axis": s.axis, "rate": s.rate}});
+            } else if let Some((_, frames, step)) = l.built.flipbook.filter(|f| Some(f.0) == m.tex) {
+                p["extras"] = json!({"frames": frames, "step": step});
+            }
+            model.push(p);
+        }
+        first_image += l.built.images.len();
     }
     if model.is_empty() {
         bail!("the stage model has nothing to draw");

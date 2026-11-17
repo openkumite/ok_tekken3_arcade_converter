@@ -5,7 +5,7 @@
 
 use crate::atlas::{self, decode_patch};
 use crate::glb::{Group, Material};
-use crate::model::parse_stage;
+use crate::model::{Face, parse_stage};
 use crate::tim::{Vram, page_origin};
 use crate::{SCALE, roms};
 use anyhow::{Context, Result, bail};
@@ -20,7 +20,16 @@ pub struct Built {
     pub vram: Vram,
     /// vertex colours stored (drawn unlit), or normals for the game's lighting
     pub prelit: bool,
+    /// the flame's pictures: the first image of them, how many follow one another, and the frames each is shown
+    pub flipbook: Option<(usize, usize, u32)>,
 }
+
+/// The torches' flame (0x801E2114 of TET2/VER.E1): every 4th frame the next of 16 pictures of 64 x 64 texels is
+/// copied over the stage's own flame texture. They are loaded at VRAM (512 + 16 (i / 8), 512 + 64 (i % 8)), 4 bits
+/// a texel, and drawn through the CLUT of the faces that show them.
+pub const FLAME_FRAMES: usize = 16;
+pub const FLAME_STEP: u32 = 4;
+const FLAME_SIZE: i32 = 64;
 
 /// A tiled texture: (tpage, clut, semi-transparent) and its TIM's place in the page (u, v, w, h in texels).
 type Tile = (u32, u32, bool, [i32; 4]);
@@ -30,6 +39,7 @@ enum Tex {
     None,
     Region(usize),
     Tile(usize),
+    Flame,
 }
 
 /// The game's stages decode at most 2 million texels; the cap bounds what a broken model can ask.
@@ -53,12 +63,20 @@ pub fn build_stage(stage: &roms::Stage) -> Result<Built> {
         vram.load_tims(t)?;
     }
     let (verts, faces) = parse_stage(&stage.model)?;
+    build(vram, &verts, &faces, None)
+}
+
+/// The meshes of a model's `faces`, their textures in `vram`. `flame`: the VRAM place of the texture the flame's
+/// pictures are copied over (they are in `vram` too): the faces showing it get the pictures, one image each.
+pub fn build(vram: Vram, verts: &[[i16; 3]], faces: &[Face], flame: Option<[i32; 2]>) -> Result<Built> {
+    // the flame's faces: their texture's corner in its page (texels), and their (tpage, clut, semi)
+    let mut flame_tex = None;
 
     // the texture regions: (tpage, clut, semi) and [umin, vmin, umax, vmax]
     let mut regions: Vec<((u32, u32, bool), [i32; 4])> = Vec::new();
     let mut tiles: Vec<Tile> = Vec::new();
     let mut texs = Vec::new();
-    for f in &faces {
+    for f in faces {
         let Some((tpage, clut)) = f.tex else {
             texs.push(Tex::None);
             continue;
@@ -66,6 +84,15 @@ pub fn build_stage(stage: &roms::Stage) -> Result<Built> {
         let semi = f.cmd & 2 != 0;
         let b = f.uv.iter().fold([255, 255, 0, 0], |b, &(u, v)| [b[0].min(u), b[1].min(v), b[2].max(u), b[3].max(v)]);
         let tile = if f.cmd & 0x80 != 0 { find_tile(&vram, tpage, b[0], b[1]) } else { None };
+        let (px, py, div) = page_origin(tpage);
+        let at = flame.map(|[x, y]| [(x - px) * div, y - py]).filter(|&[u, v]| {
+            b[0] >= u && b[1] >= v && b[2] < u + FLAME_SIZE && b[3] < v + FLAME_SIZE && (tpage >> 7) & 3 == 0
+        });
+        if let Some(at) = at {
+            flame_tex.get_or_insert((at, tpage, clut, semi));
+            texs.push(Tex::Flame);
+            continue;
+        }
         texs.push(match tile {
             Some(t) if b[2] >= t[0] + t[2] || b[3] >= t[1] + t[3] => {
                 let key = (tpage, clut, semi, t);
@@ -116,6 +143,18 @@ pub fn build_stage(stage: &roms::Stage) -> Result<Built> {
         let p = decode_patch(&vram, tp, cl, (t[0], t[1]), size(t[2], t[3]), semi)?;
         tile_img.push(images.len());
         images.push((format!("tile{}", images.len()), atlas::png(p.w, p.h, &p.rgba)?));
+    }
+
+    let mut flipbook = None;
+    if let Some((_, _, clut, semi)) = flame_tex {
+        flipbook = Some((images.len(), FLAME_FRAMES, FLAME_STEP));
+        for i in 0..FLAME_FRAMES as u32 {
+            // (the page at x 512, y 512 or 768; 4 bits a texel)
+            let tpage = 8 | (i % 8 / 4) << 4 | 1 << 11;
+            let from = ((i / 8) as i32 * FLAME_SIZE, (i % 4) as i32 * FLAME_SIZE);
+            let p = decode_patch(&vram, tpage, clut, from, size(FLAME_SIZE, FLAME_SIZE), semi)?;
+            images.push((format!("flame_{i:02}"), atlas::png(p.w, p.h, &p.rgba)?));
+        }
     }
 
     // the triangles, grouped by material; each group with the Python tool's key as text, their order in the glb
@@ -175,6 +214,12 @@ pub fn build_stage(stage: &roms::Stage) -> Result<Built> {
                     Material { name, tex: Some(0), semi },
                 )
             }
+            Tex::Flame => {
+                let ((at, ..), (first, ..)) = (flame_tex.context("a flame")?, flipbook.context("a flame")?);
+                let size = f64::from(FLAME_SIZE);
+                let material = Material { name: "flame".to_string(), tex: Some(first), semi };
+                (uv_in(-at[0], -at[1], size, size), "('flame',)".to_string(), material)
+            }
             Tex::None => {
                 let name = if semi { "flat_semi" } else { "flat" }.to_string();
                 (vec![[0.0; 2]; n], format!("('flat', {})", py(semi)), Material { name, tex: None, semi })
@@ -213,5 +258,6 @@ pub fn build_stage(stage: &roms::Stage) -> Result<Built> {
         images,
         vram,
         prelit: faces.iter().any(|f| f.col.is_some()),
+        flipbook,
     })
 }

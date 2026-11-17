@@ -9,6 +9,7 @@ pub mod atlas;
 pub mod floor;
 pub mod glb;
 pub mod model;
+pub mod objects;
 pub mod pack;
 pub mod roms;
 pub mod sky;

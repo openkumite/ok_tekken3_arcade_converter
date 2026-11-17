@@ -23,13 +23,13 @@ use crate::floor::{self, build_floor};
 use crate::glb::BACKDROP_SCALE;
 use crate::roms::{RomSet, load_program};
 use crate::stage::build_stage;
-use crate::{glb, sky};
+use crate::{glb, objects, sky};
 use anyhow::{Context, Result, bail};
 use ok_converter_common::io::{Ctx, Vfs};
 use serde_json::{Value, json};
 
 /// The pack's layout and contents; another one is converted again.
-pub const FORMAT: i64 = 3;
+pub const FORMAT: i64 = 4;
 /// What a pack's manifest names it.
 pub const KIND: &str = "t3arcade";
 /// The folder of the pack's files the game reads as they are (as the other packs').
@@ -79,11 +79,11 @@ const HIDDEN_AS: usize = 7;
 /// name of the program ROM pair they were read through.
 pub fn stages(roms: &dyn RomSet, each: &mut dyn FnMut(Value, Vec<u8>, Vec<u8>) -> Result<()>) -> Result<&'static str> {
     let program = load_program(roms)?;
-    let n = [program.stages.len(), program.floors.len(), program.skies.len()];
+    let n = [program.files.stages.len(), program.floors.len(), program.skies.len()];
     if n != [TITLES.len(); 3] {
         bail!("{n:?} stages' files, floors and skies in the program, not {} of each", TITLES.len());
     }
-    let tables = program.stages.iter().zip(&program.floors).zip(&program.skies).zip(TITLES.iter().zip(REPLACES));
+    let tables = program.files.stages.iter().zip(&program.floors).zip(&program.skies).zip(TITLES.iter().zip(REPLACES));
     let named = tables.enumerate().map(|(i, (((stage, entries), sky), (title, replaces)))| {
         (format!("stage_{i:02}"), i, stage, entries, Some(sky), *title, replaces)
     });
@@ -94,7 +94,7 @@ pub fn stages(roms: &dyn RomSet, each: &mut dyn FnMut(Value, Vec<u8>, Vec<u8>) -
     let floor: Option<Vec<_>> = program.floors.get(HIDDEN_AS).map(|t| {
         t.iter().map(|&(w0, w1)| if w0 & 0xFF00 == 0x4000 { (w0 & !0x0010_0000, w1) } else { (w0, w1) }).collect()
     });
-    let hidden = program.hidden.as_ref().zip(floor.as_ref());
+    let hidden = program.files.hidden.as_ref().zip(floor.as_ref());
     let hidden =
         hidden.map(|(stage, entries)| (HIDDEN.to_string(), HIDDEN_AS, stage, entries, None, HIDDEN_TITLE, None));
     for (name, i, stage, entries, sky, title, replaces) in named.chain(hidden) {
@@ -116,7 +116,8 @@ pub fn stages(roms: &dyn RomSet, each: &mut dyn FnMut(Value, Vec<u8>, Vec<u8>) -
                 "floor": {"tiles": floor.tiles, "size_m": floor::SIZE_M},
                 "sky": sky.as_ref().map(|s| &s.1),
             });
-            let game = glb::write_game(i, title, &st, &floor, sky.as_ref())?;
+            let layers = objects::layers(i, stage, &program.files)?;
+            let game = glb::write_game(i, title, &layers, &floor, sky.as_ref())?;
             Ok::<_, anyhow::Error>((entry, glb::write(&name, &st, &floor)?, game))
         })()
         .with_context(|| name.clone())?;
