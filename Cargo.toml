@@ -1,6 +1,6 @@
 [package]
 name = "ok_tekken3_arcade_converter"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 description = "Converts the stages of your own Tekken 3 arcade ROM set (Namco System 12, MAME's tekken3) into a pack of arenas OpenKumite can play instead of, or beside, the PlayStation game's"
 license = "MIT"

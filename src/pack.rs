@@ -29,7 +29,7 @@ use ok_converter_common::io::{Ctx, Vfs};
 use serde_json::{Value, json};
 
 /// The pack's layout and contents; another one is converted again.
-pub const FORMAT: i64 = 4;
+pub const FORMAT: i64 = 5;
 /// What a pack's manifest names it.
 pub const KIND: &str = "t3arcade";
 /// The folder of the pack's files the game reads as they are (as the other packs').

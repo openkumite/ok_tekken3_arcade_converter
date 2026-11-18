@@ -6,8 +6,9 @@
 //! - **The flame** (the seventh and the thirteenth stage; `stage::FLAME_FRAMES`): the faces whose texture the game
 //!   copies the flame's pictures over.
 //! - **The carousel** (the fourth stage; placed by 0x801E59FC, turned by 0x801E5AD0): the half platform with its
-//!   horses turns by 5/4096 of a turn each frame (after 136 frames, a sixth of a turn, the game sets it back: the
-//!   model repeats every sixth, so here it just turns on); two half roof rings and four banners stand still.
+//!   horses turns by 5/4096 of a turn each frame, and after 136 frames, a sixth of a turn, the game sets it back
+//!   (`period`: the model is the near half alone and repeats every sixth); two half roof rings and four banners
+//!   stand still.
 //!   The game draws the far cells (from 0xD2 on) behind it and the banners before everything.
 //! - **The helicopter** (the twelfth stage; 0x801E3DE0, 0x801E40C0): its body behind the model, its rotors turning
 //!   by 0x29F/4096 of a turn each frame. shortcut: it hovers where a round starts it. The game also sways it
@@ -30,6 +31,8 @@ pub struct Spin {
     pub pivot: [f64; 3],
     pub axis: [f64; 3],
     pub rate: f64,
+    /// after this many frames it is back where it began (None: it turns on)
+    pub period: Option<u32>,
 }
 
 /// Meshes drawn together, in the order the game draws them: far first.
@@ -42,6 +45,8 @@ const DROPPED: [(usize, [usize; 3]); 2] = [(0, [0xC6, 0xC7, 0xD8]), (5, [0x53, 0
 /// Where in VRAM the flame's pictures are copied to.
 const FLAME_AT: [(usize, [i32; 2]); 2] = [(6, [16, 896]), (12, [16, 960])];
 const CAROUSEL_STAGE: usize = 3;
+/// The carousel's platform is set back after this many frames: only its near half is a model.
+const CAROUSEL_FRAMES: u32 = 136;
 const CAROUSEL_BACK_CELLS: usize = 0xD2;
 const HELICOPTER_STAGE: usize = 11;
 
@@ -118,7 +123,12 @@ pub fn layers(stage: usize, st: &Stage, files: &Files) -> Result<Vec<Layer>> {
                 model(&back)?,
                 Layer {
                     built: object(c, 1, [0.0; 3], &about_y(-angle(0x955)), at)?,
-                    spin: Some(Spin { pivot: at, axis: [0.0, 1.0, 0.0], rate: angle(5) }),
+                    spin: Some(Spin {
+                        pivot: at,
+                        axis: [0.0, 1.0, 0.0],
+                        rate: angle(5),
+                        period: Some(CAROUSEL_FRAMES),
+                    }),
                 },
                 still(object(c, 2, [0.0; 3], &ONE, at)?),
                 still(object(c, 3, [0.0; 3], &half, at)?),
@@ -129,7 +139,12 @@ pub fn layers(stage: usize, st: &Stage, files: &Files) -> Result<Vec<Layer>> {
         (HELICOPTER_STAGE, _, Some(h)) => {
             let (rot, at) = (times(&about_y(-angle(0x71C)), &about_x(angle(-0x9F))), point(0, -400, 4200));
             let rotor = |model: usize, local: [f64; 3], axis: [f64; 3]| {
-                let spin = Spin { pivot: add(turn(&rot, local), at), axis: turn(&rot, axis), rate: angle(0x29F) };
+                let spin = Spin {
+                    pivot: add(turn(&rot, local), at),
+                    axis: turn(&rot, axis),
+                    rate: angle(0x29F),
+                    period: None,
+                };
                 Ok::<_, anyhow::Error>(Layer { built: object(h, model, local, &rot, at)?, spin: Some(spin) })
             };
             Ok(vec![

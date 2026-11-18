@@ -29,7 +29,7 @@ addresses). The other files of the set are not read.
 A pack:
 
 ```text
-manifest.json                {"pack": "t3arcade", "format": 4, "source": {"program": ...}, "stages": [...]}
+manifest.json                {"pack": "t3arcade", "format": 5, "source": {"program": ...}, "stages": [...]}
 stages/stage_NN.glb          each stage as a plain glb (a "backdrop" node and a "floor" node): to look at
 assets/arcade/stage_NN.glb   the same stage laid out as OpenKumite's stages: what the game reads
 ```
@@ -48,7 +48,7 @@ tile, by look) and no sky: the program has neither for it.
 
 The game's glb also has what moves on a stage (`src/objects.rs`), each as primitives of the model with `extras`:
 the torches' flame of the seventh and the thirteenth stage (`frames`, `step`: 16 pictures, 4 frames each), the
-carousel of the fourth (`spin`: a pivot, an axis, radians a frame) and the helicopter of the twelfth (its rotors
+carousel of the fourth (`spin`: a pivot, an axis, radians a frame, and the frames after which it is set back) and the helicopter of the twelfth (its rotors
 `spin`; it hovers where a round starts it: its flights are not worked out). Six cells of the first and the sixth
 stage that the game never draws are left out of it.
 
