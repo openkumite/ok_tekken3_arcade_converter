@@ -168,7 +168,8 @@ const FLOOR_COPIES: i32 = 4;
 ///   vertices), its `layers` in the order the game draws them (far first), one primitive per image of each; an
 ///   untextured face draws a white image's texel. Semi-transparent faces are left out: the game's stages have
 ///   none, and it would draw them solid. A primitive that moves says how in its extras: `spin` (`pivot`, metres;
-///   `axis`; `rate`, radians a frame of 1/60 s: it turns about the line through the pivot along the axis), or
+///   `axis`; `rate`, radians a frame of 1/60 s: it turns about the line through the pivot along the axis; `period`,
+///   where it has one: after so many frames it is back where it began), or
 ///   `frames` and `step` (a flame: its image and the `frames - 1` after it follow one another, each shown for
 ///   `step` frames).
 /// - node `floor`: the floor map's copies `floor_I_J`, one period apart.
@@ -231,6 +232,9 @@ pub fn write_game(
             // little off for the tilted helicopter's rotors); upgrade: the Y scale as a node's, the turn inside it
             if let Some(s) = &l.spin {
                 p["extras"] = json!({"spin": {"pivot": place(&s.pivot), "axis": s.axis, "rate": s.rate}});
+                if let Some(period) = s.period {
+                    p["extras"]["spin"]["period"] = period.into();
+                }
             } else if let Some((_, frames, step)) = l.built.flipbook.filter(|f| Some(f.0) == m.tex) {
                 p["extras"] = json!({"frames": frames, "step": step});
             }
